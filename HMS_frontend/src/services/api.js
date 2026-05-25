@@ -1,4 +1,4 @@
-const BASE_URL = "http://localhost:8080";
+const BASE_URL = "https://hospital-management-system-0zr0.onrender.com";
 
 // ======================
 // PATIENT APIs
@@ -13,14 +13,11 @@ export const getPatients = async () => {
   return response.json();
 };
 
-export const addPatient = async (
-  patient
-) => {
+export const addPatient = async (patient) => {
 
   const response = await fetch(
     `${BASE_URL}/patients`,
     {
-
       method: "POST",
 
       headers: {
@@ -34,9 +31,7 @@ export const addPatient = async (
   return response.json();
 };
 
-export const deletePatient = async (
-  id
-) => {
+export const deletePatient = async (id) => {
 
   await fetch(
     `${BASE_URL}/patients/${id}`,
@@ -59,14 +54,11 @@ export const getDoctors = async () => {
   return response.json();
 };
 
-export const addDoctor = async (
-  doctor
-) => {
+export const addDoctor = async (doctor) => {
 
   const response = await fetch(
     `${BASE_URL}/doctors`,
     {
-
       method: "POST",
 
       headers: {
@@ -80,9 +72,7 @@ export const addDoctor = async (
   return response.json();
 };
 
-export const deleteDoctor = async (
-  id
-) => {
+export const deleteDoctor = async (id) => {
 
   await fetch(
     `${BASE_URL}/doctors/${id}`,
