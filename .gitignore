@@ -1,0 +1,17 @@
+# Java
+*.class
+*.jar
+target/
+bin/
+lib/
+
+# Node
+node_modules/
+dist/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
