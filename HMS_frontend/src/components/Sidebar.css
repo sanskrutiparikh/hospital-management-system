@@ -56,3 +56,17 @@
 
   background: #1e293b;
 }
+.sidebar a {
+
+  text-decoration: none;
+
+  color: white;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 12px;
+
+  width: 100%;
+}

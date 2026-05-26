@@ -1,8 +1,11 @@
 import {
   FaHospitalUser,
   FaUserInjured,
-  FaChartLine
+  FaChartLine,
+  FaMoneyBillWave
 } from "react-icons/fa";
+
+import { Link } from "react-router-dom";
 
 import "./Sidebar.css";
 
@@ -12,25 +15,70 @@ function Sidebar() {
 
     <div className="sidebar">
 
+      {/* LOGO */}
+
       <h2 className="logo">
         HMS
       </h2>
 
+      {/* MENU */}
+
       <ul>
 
-        <li>
-          <FaChartLine />
-          Dashboard
-        </li>
+        {/* DASHBOARD */}
 
         <li>
-          <FaUserInjured />
-          Patients
+
+          <Link to="/">
+
+            <FaChartLine />
+
+            Dashboard
+
+          </Link>
+
         </li>
 
+        {/* PATIENTS */}
+
         <li>
-          <FaHospitalUser />
-          Doctors
+
+          <Link to="/patients">
+
+            <FaUserInjured />
+
+            Patients
+
+          </Link>
+
+        </li>
+
+        {/* DOCTORS */}
+
+        <li>
+
+          <Link to="/doctors">
+
+            <FaHospitalUser />
+
+            Doctors
+
+          </Link>
+
+        </li>
+
+        {/* BILLING */}
+
+        <li>
+
+          <Link to="/billing">
+
+            <FaMoneyBillWave />
+
+            Billing
+
+          </Link>
+
         </li>
 
       </ul>

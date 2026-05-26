@@ -1,0 +1,147 @@
+.billing-container {
+
+  width: 100%;
+}
+
+.billing-title {
+
+  font-size: 34px;
+
+  color: #0f172a;
+
+  margin-bottom: 25px;
+}
+
+/* FORM */
+
+.billing-form {
+
+  background: white;
+
+  padding: 25px;
+
+  border-radius: 20px;
+
+  box-shadow:
+    0 4px 12px rgba(0,0,0,0.08);
+
+  margin-bottom: 30px;
+}
+
+.billing-form form {
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 15px;
+}
+
+.billing-form input {
+
+  padding: 14px;
+
+  border-radius: 10px;
+
+  border: 1px solid #cbd5e1;
+
+  font-size: 16px;
+}
+
+.billing-form button {
+
+  padding: 14px;
+
+  border: none;
+
+  border-radius: 12px;
+
+  background:
+    linear-gradient(
+      135deg,
+      #2563eb,
+      #1d4ed8
+    );
+
+  color: white;
+
+  font-size: 16px;
+
+  font-weight: bold;
+
+  cursor: pointer;
+}
+
+/* BILL GRID */
+
+.bill-grid {
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(auto-fit, minmax(250px, 1fr));
+
+  gap: 20px;
+}
+
+/* BILL CARD */
+
+.bill-card {
+
+  background: white;
+
+  padding: 25px;
+
+  border-radius: 20px;
+
+  box-shadow:
+    0 6px 18px rgba(0,0,0,0.08);
+
+  transition: 0.3s;
+}
+
+.bill-card:hover {
+
+  transform: translateY(-5px);
+}
+
+.bill-card h3 {
+
+  color: #0f172a;
+}
+
+.bill-card p {
+
+  color: #2563eb;
+
+  font-size: 22px;
+
+  font-weight: bold;
+}
+/* TOTAL */
+
+.bill-card h3 {
+
+  color: #16a34a;
+
+  margin-top: 15px;
+}
+
+/* PAID STATUS */
+
+.paid-status {
+
+  display: inline-block;
+
+  margin-top: 15px;
+
+  padding: 8px 14px;
+
+  border-radius: 20px;
+
+  background: #dcfce7;
+
+  color: #166534;
+
+  font-weight: bold;
+}

@@ -5,9 +5,29 @@ import {
   FaHeartbeat
 } from "react-icons/fa";
 
+import { useEffect, useState } from "react";
+
+import { getPatients } from "../services/api";
+
 import "../styles/Dashboard.css";
 
 function Dashboard() {
+
+  const [patients, setPatients]
+    = useState([]);
+
+  useEffect(() => {
+
+    loadPatients();
+
+  }, []);
+
+  const loadPatients = async () => {
+
+    const data = await getPatients();
+
+    setPatients(data);
+  };
 
   return (
 
@@ -40,7 +60,7 @@ function Dashboard() {
 
           <FaUserInjured className="stat-icon" />
 
-          <h2>120</h2>
+          <h2>{patients.length}</h2>
 
           <p>Total Patients</p>
 
@@ -98,73 +118,25 @@ function Dashboard() {
 
               <th>Disease</th>
 
-              <th>Status</th>
-
             </tr>
 
           </thead>
 
           <tbody>
 
-            <tr>
+            {patients.map((patient) => (
 
-              <td>101</td>
+              <tr key={patient.id}>
 
-              <td>Rahul Sharma</td>
+                <td>{patient.id}</td>
 
-              <td>Fever</td>
+                <td>{patient.name}</td>
 
-              <td>
+                <td>{patient.disease}</td>
 
-                <span className="status active">
+              </tr>
 
-                  Active
-
-                </span>
-
-              </td>
-
-            </tr>
-
-            <tr>
-
-              <td>102</td>
-
-              <td>Ananya Patel</td>
-
-              <td>Diabetes</td>
-
-              <td>
-
-                <span className="status stable">
-
-                  Stable
-
-                </span>
-
-              </td>
-
-            </tr>
-
-            <tr>
-
-              <td>103</td>
-
-              <td>Rohan Verma</td>
-
-              <td>Asthma</td>
-
-              <td>
-
-                <span className="status critical">
-
-                  Critical
-
-                </span>
-
-              </td>
-
-            </tr>
+            ))}
 
           </tbody>
 

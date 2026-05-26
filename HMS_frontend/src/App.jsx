@@ -14,6 +14,8 @@ import Doctors from "./pages/Doctors";
 
 import "./App.css";
 
+import Billing from "./pages/Billing";
+
 function App() {
 
   return (
@@ -42,6 +44,10 @@ function App() {
               path="/doctors"
               element={<Doctors />}
             />
+            <Route
+             path="/billing"
+             element={<Billing />}
+              />
 
           </Routes>
 
