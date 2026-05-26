@@ -6,20 +6,18 @@ import {
   deletePatient
 } from "../services/api";
 
-import Navbar from "../components/Navbar";
-
 import "../styles/Patients.css";
 
 function Patients() {
 
   const [patients, setPatients]
-  = useState([]);
+    = useState([]);
 
   const [name, setName]
-  = useState("");
+    = useState("");
 
   const [disease, setDisease]
-  = useState("");
+    = useState("");
 
   // LOAD PATIENTS
   useEffect(() => {
@@ -41,7 +39,6 @@ function Patients() {
     e.preventDefault();
 
     const newPatient = {
-
       name,
       disease
     };
@@ -55,9 +52,7 @@ function Patients() {
   };
 
   // DELETE PATIENT
-  const handleDelete = async (
-    id
-  ) => {
+  const handleDelete = async (id) => {
 
     await deletePatient(id);
 
@@ -66,103 +61,87 @@ function Patients() {
 
   return (
 
-    <>
+    <div className="container">
 
-      <Navbar />
+      <h1 className="title">
+        Patient Management
+      </h1>
 
-      <div className="container">
+      {/* FORM */}
 
-        <h1 className="title">
-          Patient Management
-        </h1>
+      <div className="form-container">
 
-        {/* FORM */}
+        <form onSubmit={handleSubmit}>
 
-        <div className="form-container">
+          <input
+            type="text"
+            placeholder="Enter Patient Name"
+            value={name}
+            onChange={(e) =>
+              setName(e.target.value)
+            }
+            className="input-field"
+          />
 
-          <form onSubmit={handleSubmit}>
+          <input
+            type="text"
+            placeholder="Enter Disease"
+            value={disease}
+            onChange={(e) =>
+              setDisease(e.target.value)
+            }
+            className="input-field"
+          />
 
-            <input
-              type="text"
-              placeholder="Enter Patient Name"
-              value={name}
-              onChange={(e) =>
-                setName(e.target.value)
-              }
-              className="input-field"
-            />
+          <button
+            type="submit"
+            className="add-btn"
+          >
+            Add Patient
+          </button>
 
-            <input
-              type="text"
-              placeholder="Enter Disease"
-              value={disease}
-              onChange={(e) =>
-                setDisease(e.target.value)
-              }
-              className="input-field"
-            />
-
-            <button
-              type="submit"
-              className="add-btn"
-            >
-              Add Patient
-            </button>
-
-          </form>
-
-        </div>
-
-        {/* PATIENT LIST */}
-
-        <div className="patient-list">
-
-          {patients.map((patient) => (
-
-            <div
-              key={patient.id}
-              className="patient-card"
-            >
-
-              <h3>{patient.name}</h3>
-
-              <p>
-
-                <strong>ID:</strong>
-
-                {" "}
-
-                {patient.id}
-
-              </p>
-
-              <p>
-
-                <strong>Disease:</strong>
-
-                {" "}
-
-                {patient.disease}
-
-              </p>
-
-              <button
-                onClick={() =>
-                  handleDelete(patient.id)
-                }
-                className="delete-btn"
-              >
-                Delete
-              </button>
-
-            </div>
-          ))}
-
-        </div>
+        </form>
 
       </div>
 
-    </>
+      {/* PATIENT LIST */}
+
+      <div className="patient-list">
+
+        {patients.map((patient) => (
+
+          <div
+            key={patient.id}
+            className="patient-card"
+          >
+
+            <h3>{patient.name}</h3>
+
+            <p>
+              <strong>ID:</strong>{" "}
+              {patient.id}
+            </p>
+
+            <p>
+              <strong>Disease:</strong>{" "}
+              {patient.disease}
+            </p>
+
+            <button
+              onClick={() =>
+                handleDelete(patient.id)
+              }
+              className="delete-btn"
+            >
+              Delete
+            </button>
+
+          </div>
+        ))}
+
+      </div>
+
+    </div>
   );
 }
 
