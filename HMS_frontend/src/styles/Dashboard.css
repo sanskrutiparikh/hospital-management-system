@@ -1,0 +1,212 @@
+.dashboard {
+
+  width: 100%;
+}
+
+/* HERO SECTION */
+
+.hero-section {
+
+  background:
+    linear-gradient(
+      135deg,
+      #2563eb,
+      #1e3a8a
+    );
+
+  color: white;
+
+  padding: 40px;
+
+  border-radius: 24px;
+
+  margin-bottom: 35px;
+
+  box-shadow:
+    0 10px 25px rgba(37,99,235,0.25);
+}
+
+.hero-section h1 {
+
+  margin: 0;
+
+  font-size: 42px;
+
+  font-weight: bold;
+}
+
+.hero-section p {
+
+  margin-top: 12px;
+
+  font-size: 18px;
+
+  opacity: 0.9;
+}
+
+/* STATS GRID */
+
+.stats-grid {
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(auto-fit, minmax(220px, 1fr));
+
+  gap: 25px;
+}
+
+/* STAT CARD */
+
+.stat-card {
+
+  background:
+    rgba(255,255,255,0.75);
+
+  backdrop-filter: blur(12px);
+
+  padding: 30px;
+
+  border-radius: 22px;
+
+  box-shadow:
+    0 8px 25px rgba(0,0,0,0.08);
+
+  transition:
+    transform 0.3s,
+    box-shadow 0.3s;
+
+  text-align: center;
+
+  border:
+    1px solid rgba(255,255,255,0.2);
+}
+
+.stat-card:hover {
+
+  transform:
+    translateY(-8px) scale(1.02);
+
+  box-shadow:
+    0 15px 35px rgba(37,99,235,0.18);
+}
+
+/* ICON */
+
+.stat-icon {
+
+  font-size: 42px;
+
+  color: #2563eb;
+
+  margin-bottom: 15px;
+}
+
+/* CARD TEXT */
+
+.stat-card h2 {
+
+  font-size: 34px;
+
+  color: #0f172a;
+
+  margin: 0;
+}
+
+.stat-card p {
+
+  color: #64748b;
+
+  margin-top: 10px;
+
+  font-size: 16px;
+}
+
+/* RECENT SECTION */
+
+.recent-section {
+
+  margin-top: 40px;
+
+  background: white;
+
+  padding: 25px;
+
+  border-radius: 22px;
+
+  box-shadow:
+    0 8px 25px rgba(0,0,0,0.08);
+}
+
+.recent-section h2 {
+
+  margin-bottom: 20px;
+
+  color: #0f172a;
+}
+
+/* TABLE */
+
+.patients-table {
+
+  width: 100%;
+
+  border-collapse: collapse;
+}
+
+.patients-table th,
+.patients-table td {
+
+  padding: 16px;
+
+  text-align: left;
+
+  border-bottom:
+    1px solid #e2e8f0;
+}
+
+.patients-table th {
+
+  color: #475569;
+
+  font-size: 15px;
+}
+
+.patients-table td {
+
+  color: #0f172a;
+}
+
+/* STATUS */
+
+.status {
+
+  padding: 6px 14px;
+
+  border-radius: 20px;
+
+  font-size: 14px;
+
+  font-weight: bold;
+}
+
+.active {
+
+  background: #dcfce7;
+
+  color: #166534;
+}
+
+.stable {
+
+  background: #dbeafe;
+
+  color: #1d4ed8;
+}
+
+.critical {
+
+  background: #fee2e2;
+
+  color: #b91c1c;
+}
