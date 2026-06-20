@@ -1,0 +1,235 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # Database Service (MySQL)
+  # ==========================================
+  mysql-db:
+    image: mysql:8.0
+    container_name: mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: hospital_db
+    ports:
+      - "3306:3306"
+    networks:
+      - hms-network
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./database/migration.sql:/docker-entrypoint-initdb.d/migration.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ==========================================
+  # Eureka Service Discovery Server
+  # ==========================================
+  eureka-server:
+    build:
+      context: ./eureka-server
+    container_name: eureka-server
+    ports:
+      - "8761:8761"
+    networks:
+      - hms-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8761/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ==========================================
+  # Authentication Microservice
+  # ==========================================
+  auth-service:
+    build:
+      context: ./auth-service
+    container_name: auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # Patient Microservice
+  # ==========================================
+  patient-service:
+    build:
+      context: ./patient-service
+    container_name: patient-service
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # Doctor Microservice
+  # ==========================================
+  doctor-service:
+    build:
+      context: ./doctor-service
+    container_name: doctor-service
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # Appointment Microservice
+  # ==========================================
+  appointment-service:
+    build:
+      context: ./appointment-service
+    container_name: appointment-service
+    ports:
+      - "8083:8083"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # Billing Microservice
+  # ==========================================
+  billing-service:
+    build:
+      context: ./billing-service
+    container_name: billing-service
+    ports:
+      - "8084:8084"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # API Cloud Gateway Service
+  # ==========================================
+  api-gateway:
+    build:
+      context: ./api-gateway
+    container_name: api-gateway
+    ports:
+      - "9090:9090"
+    environment:
+      - EUREKA_SERVER_URL=http://eureka-server:8761/eureka/
+      - AI_SERVICE_URL=http://ai-service:8000
+    networks:
+      - hms-network
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+
+  # ==========================================
+  # AI Microservice (Python FastAPI)
+  # ==========================================
+  ai-service:
+    build:
+      context: ./ai-service
+    container_name: ai-service
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=mysql-db
+      - DB_PORT=3306
+      - DB_NAME=hospital_db
+      - DB_USER=root
+      - DB_PASSWORD=${DB_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CHROMA_PERSIST_DIR=/app/chroma_db
+    volumes:
+      - chroma-data:/app/chroma_db
+    networks:
+      - hms-network
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+  # ==========================================
+  # HMS Frontend Application
+  # ==========================================
+  hms-frontend:
+    build:
+      context: ./HMS_frontend
+    container_name: hms-frontend
+    ports:
+      - "80:80"
+    networks:
+      - hms-network
+    depends_on:
+      - api-gateway
+
+networks:
+  hms-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+    driver: local
+  chroma-data:
+    driver: local
+
