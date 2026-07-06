@@ -52,11 +52,35 @@ const AIAssistant = () => {
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       console.error(err);
+      let errMsg = "I encountered an error connecting to the AI agent. Please ensure the backend AI service is online.";
+      if (err.response) {
+        const data = err.response.data;
+        if (typeof data === "string") {
+          errMsg = data;
+        } else if (data && typeof data === "object") {
+          if (data.detail) {
+            if (typeof data.detail === "string") {
+              errMsg = data.detail;
+            } else if (Array.isArray(data.detail)) {
+              errMsg = data.detail.map((d) => `${d.loc.join(".")}: ${d.msg}`).join(", ");
+            } else {
+              errMsg = JSON.stringify(data.detail);
+            }
+          } else if (data.message) {
+            errMsg = data.message;
+          } else if (data.error) {
+            errMsg = data.error;
+          }
+        }
+      } else if (err.message) {
+        errMsg = err.message;
+      }
+
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: "I encountered an error connecting to the AI agent. Please ensure the backend AI service is online.",
+          content: errMsg,
           category: "GENERAL",
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },

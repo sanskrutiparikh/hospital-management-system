@@ -41,11 +41,28 @@ const Signup = () => {
       }, 2000);
     } catch (err) {
       console.error("Signup failed:", err);
-      setError(
-        err.response?.data?.message || 
-        err.response?.data || 
-        "Failed to register. Please check details or verify if the email is already in use."
-      );
+      let errMsg = "Failed to register. Please check details or verify if the email is already in use.";
+      if (err.response) {
+        const data = err.response.data;
+        if (typeof data === "string") {
+          errMsg = data;
+        } else if (data && typeof data === "object") {
+          if (data.validationErrors) {
+            errMsg = Object.entries(data.validationErrors)
+              .map(([field, msg]) => `${field}: ${msg}`)
+              .join(", ");
+          } else if (data.message) {
+            errMsg = data.message;
+          } else if (data.detail) {
+            errMsg = data.detail;
+          } else if (data.error) {
+            errMsg = data.error;
+          }
+        }
+      } else if (err.message) {
+        errMsg = err.message;
+      }
+      setError(errMsg);
     } finally {
       setLoading(false);
     }

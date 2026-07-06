@@ -34,10 +34,18 @@ const AIReportAnalysis = () => {
 
     try {
       const result = await analyzeMedicalReport(reportFile);
-      setAnalysisResult(result);
+      // Handle JSON error responses (status 200 but success: false)
+      if (result.success === false) {
+        setReportError(result.error || "Unknown error during report analysis.");
+      } else {
+        setAnalysisResult(result);
+      }
     } catch (err) {
       console.error(err);
-      setReportError(err.response?.data?.detail || "Failed to analyze medical report. Ensure it is a valid PDF and the AI service is active.");
+      const data = err.response?.data;
+      // Handle both new format {success, error} and old format {detail}
+      const errorMsg = data?.error || data?.detail || "Failed to analyze medical report. Ensure it is a valid PDF and the AI service is active.";
+      setReportError(errorMsg);
     } finally {
       setAnalyzing(false);
     }
