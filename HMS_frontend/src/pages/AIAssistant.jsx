@@ -52,28 +52,28 @@ const AIAssistant = () => {
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       console.error(err);
-      let errMsg = "I encountered an error connecting to the AI agent. Please ensure the backend AI service is online.";
+      let errMsg = "AI service is temporarily unavailable.";
       if (err.response) {
         const data = err.response.data;
-        if (typeof data === "string") {
-          errMsg = data;
-        } else if (data && typeof data === "object") {
-          if (data.detail) {
-            if (typeof data.detail === "string") {
-              errMsg = data.detail;
-            } else if (Array.isArray(data.detail)) {
-              errMsg = data.detail.map((d) => `${d.loc.join(".")}: ${d.msg}`).join(", ");
-            } else {
-              errMsg = JSON.stringify(data.detail);
-            }
-          } else if (data.message) {
-            errMsg = data.message;
-          } else if (data.error) {
+        if (data && typeof data === "object") {
+          if (data.error) {
             errMsg = data.error;
+          } else if (data.detail && typeof data.detail === "string") {
+            errMsg = data.detail;
           }
         }
       } else if (err.message) {
         errMsg = err.message;
+      }
+
+      // Map to Phase 7 required friendly messages
+      if (errMsg.includes("Internal Server Error") || errMsg.includes("unexpected error") || errMsg.includes("500") || errMsg.includes("unavailable") || errMsg.includes("error")) {
+        errMsg = "AI service is temporarily unavailable.";
+      }
+      
+      const isRagQuery = query.toLowerCase().includes("policy") || query.toLowerCase().includes("guideline") || query.toLowerCase().includes("sop") || errMsg.toLowerCase().includes("knowledge");
+      if (isRagQuery) {
+        errMsg = "Knowledge base is currently unavailable.";
       }
 
       setMessages((prev) => [
@@ -83,6 +83,8 @@ const AIAssistant = () => {
           content: errMsg,
           category: "GENERAL",
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          isError: true,
+          failedQuery: query
         },
       ]);
     } finally {
@@ -206,12 +208,27 @@ const AIAssistant = () => {
                 <div className={`px-5 py-3.5 rounded-2xl shadow-sm border ${
                   msg.role === "user"
                     ? "bg-blue-600 text-white border-blue-600 rounded-tr-none"
-                    : "bg-white text-slate-800 border-slate-200/80 rounded-tl-none"
+                    : msg.isError
+                      ? "bg-red-50 text-red-800 border-red-200 rounded-tl-none animate-shake"
+                      : "bg-white text-slate-800 border-slate-200/80 rounded-tl-none"
                 }`}>
                   {msg.role === "user" ? (
                     <p className="text-sm font-medium leading-relaxed break-words">{msg.content}</p>
                   ) : (
-                    <div className="text-sm space-y-1">{formatResponse(msg.content)}</div>
+                    <div className="text-sm space-y-1">
+                      {formatResponse(msg.content)}
+                      {msg.isError && (
+                        <div className="mt-2 pt-2 border-t border-red-100 flex items-center">
+                          <button
+                            type="button"
+                            onClick={() => handleSend(msg.failedQuery)}
+                            className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-800 text-[10px] font-bold rounded-lg border border-red-200 transition-all duration-150 cursor-pointer"
+                          >
+                            Retry Query
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
                 

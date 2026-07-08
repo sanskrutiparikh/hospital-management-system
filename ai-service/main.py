@@ -3,13 +3,22 @@ import base64
 import json
 import logging
 import re
+import time
+import traceback
+import asyncio
+import uuid
+import concurrent.futures
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
+from logging.handlers import RotatingFileHandler
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Security, UploadFile, File, Form, status
+from fastapi import FastAPI, Depends, HTTPException, Security, UploadFile, File, Form, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from jose import jwt, JWTError
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -29,30 +38,34 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.outputs import ChatResult, ChatGeneration
 from langchain_core.embeddings import Embeddings
-import traceback
 
-# Initialize Logger
-logging.basicConfig(level=logging.INFO)
+# Ensure logs directory exists at the workspace level
+workspace_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+logs_dir = os.path.join(workspace_dir, "logs")
+os.makedirs(logs_dir, exist_ok=True)
+log_file = os.path.join(logs_dir, "ai-service.log")
+
+# Setup RotatingFileHandler (Phase 6)
 logger = logging.getLogger("ai-service")
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+
+file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8")
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Also log to stdout
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 # Load environment variables
-# First try parent directory (.env at root)
-parent_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+parent_env = os.path.join(workspace_dir, ".env")
 if os.path.exists(parent_env):
     load_dotenv(dotenv_path=parent_env)
 else:
     load_dotenv()
-
-app = FastAPI(title="MediPulse AI Service", version="1.0.0")
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # JWT Security Setup
 security = HTTPBearer()
@@ -61,7 +74,6 @@ JWT_SECRET = os.getenv("JWT_SECRET", "404E635266556A586E3272357538782F413F442847
 def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> Dict[str, Any]:
     token = credentials.credentials
     try:
-        # Decode the Base64 key as done in Java
         secret_bytes = base64.b64decode(JWT_SECRET)
         payload = jwt.decode(token, secret_bytes, algorithms=["HS256"])
         email = payload.get("sub")
@@ -79,24 +91,130 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
             detail=f"Invalid or expired security token: {str(e)}"
         )
 
-# Database Setup
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "oracle")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = os.getenv("DB_NAME", "hospital_db")
+# Helper function to run sync calls in a thread pool with a timeout
+def run_with_timeout(func, timeout, *args, **kwargs):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as e:
+            logger.error(f"Timeout occurred: {e}")
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
 
-DB_URI = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(DB_URI, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Helper to retry Gemini calls with exponential backoff (Phase 4)
+def retry_llm_call(func, *args, **kwargs):
+    max_retries = 3
+    backoff = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            start_time = datetime.now()
+            res = run_with_timeout(func, 30.0, *args, **kwargs)
+            latency = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Gemini latency: {latency:.4f}s")
+            return res
+        except Exception as e:
+            if attempt == max_retries:
+                logger.error(f"Gemini call failed after {max_retries} retries: {str(e)}")
+                raise e
+            logger.warning(f"Gemini call failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}. Retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff *= 2.0
 
-# LangChain Model setup
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-is_mock_mode = not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GEMINI_API_KEY_HERE" or GOOGLE_API_KEY.strip() == ""
+# Mock Classes for Testing when GEMINI_API_KEY is not configured
+class MockChatGoogleGenerativeAI(BaseChatModel):
+    model: str = "mock-model"
+    google_api_key: Optional[str] = None
+    temperature: float = 0.0
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        is_classification = False
+        is_rephrase = False
+        is_clinical = False
+        clinical_text = ""
+        user_query = ""
+        system_text = ""
+        for msg in messages:
+            if isinstance(msg, AIMessage):
+                continue
+            content_lower = msg.content.lower() if msg.content else ""
+            if isinstance(msg, HumanMessage):
+                user_query = content_lower
+            else:
+                system_text = content_lower
+            if "expert clinical summarizer" in content_lower:
+                is_clinical = True
+                clinical_text = msg.content
+
+        if "routing agent" in system_text and "classify" in system_text:
+            is_classification = True
+
+        if "reformulate" in system_text or "standalone question" in system_text:
+            is_rephrase = True
+
+        if is_rephrase:
+            raw_query = ""
+            for msg in reversed(messages):
+                if isinstance(msg, HumanMessage):
+                    raw_query = msg.content
+                    break
+            logger.debug(f"[MockLLM] Rephrase request — returning query as-is: '{raw_query}'")
+            response_text = raw_query
+        elif is_classification:
+            logger.debug(f"[MockLLM] Classification request — user_query='{user_query}'")
+            if any(k in user_query for k in ["policy", "guideline", "sop", "insurance", "admission protocol"]):
+                response_text = "RAG"
+            elif any(k in user_query for k in ["patient", "doctor", "schedule", "revenue", "bill", "appointment", "experience", "medical history", "show all", "list", "summary", "hospital summary"]):
+                response_text = "SQL"
+            else:
+                response_text = "GENERAL"
+        elif is_clinical:
+            report_text_marker = "report text:"
+            idx = clinical_text.lower().find(report_text_marker)
+            if idx != -1:
+                raw_report = clinical_text[idx + len(report_text_marker):].strip()
+            else:
+                raw_report = clinical_text
+            parsed_data = parse_report_text(raw_report)
+            response_text = json.dumps(parsed_data)
+            logger.debug(f"[MockLLM] Clinical analysis request — response='{response_text}'")
+        else:
+            last_msg = messages[-1].content if messages else ""
+            last_msg_lower = last_msg.lower()
+
+            if "2+2" in last_msg_lower or "2 + 2" in last_msg_lower:
+                response_text = "4"
+            elif "hospital policy" in last_msg_lower or "knowledge assistant" in last_msg_lower:
+                response_text = "According to our hospital policies, check-in requires a valid ID. Details are saved in policy guidelines."
+            elif "hospital db assistant" in last_msg_lower:
+                response_text = "Based on the database, we have registered patients and active doctors on staff."
+            else:
+                response_text = "Hello! I am MediPulse AI, your hospital assistant. How can I help you today!"
+
+        generation = ChatGeneration(message=AIMessage(content=response_text))
+        return ChatResult(generations=[generation])
+
+    @property
+    def _llm_type(self) -> str:
+        return "mock-chat-google"
+
+class MockGoogleGenerativeAIEmbeddings(Embeddings):
+    model: str = "mock-embedding"
+    google_api_key: Optional[str] = None
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [[0.1] * 768 for _ in texts]
+        
+    def embed_query(self, text: str) -> List[float]:
+        return [0.1] * 768
 
 def parse_report_text(text: str) -> dict:
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    
     patient_name = "Unknown Patient"
     doctor = "Unknown / Unspecified"
     diagnosis = "No specific diagnosis found."
@@ -148,138 +266,95 @@ def parse_report_text(text: str) -> dict:
         "recommendations": cleaned_recs
     }
 
-class MockChatGoogleGenerativeAI(BaseChatModel):
-    model: str = "mock-model"
-    google_api_key: Optional[str] = None
-    temperature: float = 0.0
+# Embedding cache class (Phase 4)
+class CachedEmbeddings(Embeddings):
+    def __init__(self, base_embeddings: Embeddings, cache_file: str):
+        self.base_embeddings = base_embeddings
+        self.cache_file = cache_file
+        self.cache = {}
+        self._load_cache()
 
-    def _generate(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[Any] = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        # Detect structured classification requests (system + human messages)
-        is_classification = False
-        is_rephrase = False
-        is_clinical = False
-        clinical_text = ""
-        user_query = ""
-        system_text = ""
-        for msg in messages:
-            if isinstance(msg, AIMessage):
-                continue
-            content_lower = msg.content.lower() if msg.content else ""
-            if isinstance(msg, HumanMessage):
-                user_query = content_lower
-            else:
-                system_text = content_lower
-            if "expert clinical summarizer" in content_lower:
-                is_clinical = True
-                clinical_text = msg.content
+    def _load_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    self.cache = json.load(f)
+                logger.info(f"Loaded {len(self.cache)} embeddings from cache.")
+            except Exception as e:
+                logger.error(f"Embedding cache corrupt: {e}. Rebuilding...")
+                self._rebuild_cache()
 
-        if "routing agent" in system_text and "classify" in system_text:
-            is_classification = True
+    def _rebuild_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                os.remove(self.cache_file)
+            except Exception as e:
+                logger.error(f"Failed to delete corrupt cache file: {e}")
+        self.cache = {}
+        self._save_cache()
 
-        # Detect rephrase/contextualization requests — return user query as-is
-        if "reformulate" in system_text or "standalone question" in system_text:
-            is_rephrase = True
-
-        if is_rephrase:
-            # In mock mode, the rephrase chain should pass through the user query unchanged
-            # Extract the raw user query from the last HumanMessage
-            raw_query = ""
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    raw_query = msg.content
-                    break
-            logger.debug(f"[MockLLM] Rephrase request — returning query as-is: '{raw_query}'")
-            response_text = raw_query
-        elif is_classification:
-            # Classify based ONLY on the user query (HumanMessage), not the system prompt
-            logger.debug(f"[MockLLM] Classification request — user_query='{user_query}'")
-            if any(k in user_query for k in ["policy", "guideline", "sop", "insurance", "admission protocol"]):
-                response_text = "RAG"
-            elif any(k in user_query for k in ["patient", "doctor", "schedule", "revenue", "bill", "appointment", "experience", "medical history", "show all", "list", "summary", "hospital summary"]):
-                response_text = "SQL"
-            else:
-                response_text = "GENERAL"
-        elif is_clinical:
-            report_text_marker = "report text:"
-            idx = clinical_text.lower().find(report_text_marker)
-            if idx != -1:
-                raw_report = clinical_text[idx + len(report_text_marker):].strip()
-            else:
-                raw_report = clinical_text
-            parsed_data = parse_report_text(raw_report)
-            response_text = json.dumps(parsed_data)
-            logger.debug(f"[MockLLM] Clinical analysis request — response='{response_text}'")
-        else:
-            # Non-classification requests — use last message content
-            last_msg = messages[-1].content if messages else ""
-            last_msg_lower = last_msg.lower()
-
-            if "2+2" in last_msg_lower or "2 + 2" in last_msg_lower:
-                response_text = "4"
-            elif "hospital policy" in last_msg_lower or "knowledge assistant" in last_msg_lower:
-                response_text = "According to our hospital policies, check-in requires a valid ID. Details are saved in policy guidelines."
-            elif "hospital db assistant" in last_msg_lower:
-                response_text = "Based on the database, we have registered patients and active doctors on staff."
-            else:
-                response_text = "Hello! I am MediPulse AI, your hospital assistant. How can I help you today!"
-
-        generation = ChatGeneration(message=AIMessage(content=response_text))
-        return ChatResult(generations=[generation])
-
-    @property
-    def _llm_type(self) -> str:
-        return "mock-chat-google"
-
-class MockGoogleGenerativeAIEmbeddings(Embeddings):
-    model: str = "mock-embedding"
-    google_api_key: Optional[str] = None
+    def _save_cache(self):
+        try:
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.cache, f, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save embedding cache: {e}")
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return [[0.1] * 768 for _ in texts]
-        
+        results = []
+        texts_to_embed = []
+        indices_to_embed = []
+        for i, text in enumerate(texts):
+            if text in self.cache:
+                results.append(self.cache[text])
+            else:
+                results.append(None)
+                texts_to_embed.append(text)
+                indices_to_embed.append(i)
+
+        if texts_to_embed:
+            try:
+                start_time = datetime.now()
+                embedded = run_with_timeout(
+                    self.base_embeddings.embed_documents,
+                    15.0,
+                    texts=texts_to_embed
+                )
+                latency = (datetime.now() - start_time).total_seconds()
+                logger.info(f"Embedding latency: {latency:.4f}s")
+                for text, vector in zip(texts_to_embed, embedded):
+                    self.cache[text] = vector
+                self._save_cache()
+                for i, idx in enumerate(indices_to_embed):
+                    results[idx] = embedded[i]
+            except Exception as e:
+                logger.error(f"Embedding generation failed: {e}")
+                # Return mock embeddings as fallback if embeddings are unavailable to keep system alive
+                fallback = [[0.1] * 768 for _ in texts_to_embed]
+                for i, idx in enumerate(indices_to_embed):
+                    results[idx] = fallback[i]
+        return results
+
     def embed_query(self, text: str) -> List[float]:
-        return [0.1] * 768
+        if text in self.cache:
+            return self.cache[text]
+        try:
+            start_time = datetime.now()
+            vector = run_with_timeout(
+                self.base_embeddings.embed_query,
+                15.0,
+                text=text
+            )
+            latency = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Embedding latency: {latency:.4f}s")
+            self.cache[text] = vector
+            self._save_cache()
+            return vector
+        except Exception as e:
+            logger.error(f"Embedding query generation failed: {e}")
+            return [0.1] * 768
 
-if is_mock_mode:
-    logger.warning("GEMINI_API_KEY is not set or is a placeholder. Initializing AI Service in MOCK mode.")
-    llm = MockChatGoogleGenerativeAI()
-    embeddings = MockGoogleGenerativeAIEmbeddings()
-else:
-    logger.info("Initializing AI Service with Gemini API.")
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.0
-    )
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
-        google_api_key=GOOGLE_API_KEY
-    )
-
-# Connect LangChain SQLDatabase
-try:
-    db = SQLDatabase.from_uri(DB_URI)
-    sql_agent = create_sql_agent(
-        llm=llm,
-        db=db,
-        agent_type="zero-shot-react-description",
-        verbose=True,
-        handle_parsing_errors=True
-    )
-    logger.info("LangChain SQL Agent successfully initialized.")
-except Exception as e:
-    logger.error(f"Failed to initialize SQL Database agent: {str(e)}")
-    logger.error(traceback.format_exc())
-    db = None
-    sql_agent = None
-
-# Pure Python Vector Store fallback to avoid Visual C++ dependency issues on Windows
+# Pure Python Vector Store Fallback with Robust Load (Phase 4)
 def cosine_similarity(v1, v2):
     dot_product = sum(a*b for a, b in zip(v1, v2))
     magnitude1 = sum(a*a for a in v1) ** 0.5
@@ -313,7 +388,18 @@ class SimpleVectorStore:
                         self.embeddings_data.append(item["embedding"])
                 logger.info(f"Loaded {len(self.documents)} documents from simple vector store.")
             except Exception as e:
-                logger.error(f"Failed to load vector store: {e}")
+                logger.error(f"Failed to load vector store: {e}. Recreating...")
+                self.recreate_store()
+
+    def recreate_store(self):
+        try:
+            if os.path.exists(self.file_path):
+                os.remove(self.file_path)
+        except Exception as e:
+            logger.error(f"Could not remove corrupt vector store file: {e}")
+        self.documents = []
+        self.embeddings_data = []
+        self._save()
 
     def _save(self):
         try:
@@ -358,15 +444,328 @@ class SimpleVectorStore:
                 return self.store.similarity_search(query, k=self.k_val)
         return SimpleRetriever(self, k)
 
-# RAG / Vector Store Setup
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-vector_store = SimpleVectorStore(
-    persist_directory=CHROMA_PERSIST_DIR,
-    embedding_function=embeddings
+# Centralized AI Initialization and Connection Pooling Manager (Requirement 1 & 7)
+class AIServiceManager:
+    def __init__(self):
+        self.is_mock_mode = False
+        self.gemini_ready = False
+        self.vector_store_ready = False
+        self.database_ready = False
+        self.embeddings_ready = False
+        
+        self.llm = None
+        self.raw_embeddings = None
+        self.embeddings = None
+        self.db_engine = None
+        self.db = None
+        self.sql_agent = None
+        self.vector_store = None
+        
+        self.rephrase_chain = None
+        self.general_chat_chain = None
+        self.rag_chain = None
+
+    def initialize(self):
+        google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.is_mock_mode = not google_api_key or google_api_key == "YOUR_GEMINI_API_KEY_HERE" or google_api_key.strip() == ""
+        
+        # 1. Initialize Gemini LLM
+        if self.is_mock_mode:
+            logger.warning("GEMINI_API_KEY is not set or is a placeholder. Initializing AI Service in MOCK mode.")
+            self.llm = MockChatGoogleGenerativeAI()
+            self.gemini_ready = True
+        else:
+            try:
+                self.llm = ChatGoogleGenerativeAI(
+                    model="gemini-1.5-flash",
+                    google_api_key=google_api_key,
+                    temperature=0.0,
+                    timeout=30.0
+                )
+                self.gemini_ready = True
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini LLM: {e}")
+                self.gemini_ready = False
+
+        # 2. Initialize Embeddings
+        if self.is_mock_mode:
+            self.raw_embeddings = MockGoogleGenerativeAIEmbeddings()
+        else:
+            try:
+                self.raw_embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001",
+                    google_api_key=google_api_key,
+                    timeout=15.0
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize Google embeddings: {e}")
+
+        # Wrap in CachedEmbeddings
+        try:
+            persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+            os.makedirs(persist_dir, exist_ok=True)
+            cache_file = os.path.join(persist_dir, "embeddings_cache.json")
+            self.embeddings = CachedEmbeddings(self.raw_embeddings, cache_file)
+            self.embeddings_ready = True
+        except Exception as e:
+            logger.error(f"Failed to setup CachedEmbeddings: {e}")
+            self.embeddings_ready = False
+
+        # 3. Initialize Vector Store
+        try:
+            persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+            self.vector_store = SimpleVectorStore(
+                persist_directory=persist_dir,
+                embedding_function=self.embeddings
+            )
+            self.vector_store_ready = True
+        except Exception as e:
+            logger.error(f"Failed to initialize vector store: {e}")
+            self.vector_store_ready = False
+
+        # 4. Initialize Database connection pooling
+        self.initialize_db()
+
+        # 5. Initialize LangChain chains (Connection Pooling / Re-use)
+        if self.gemini_ready:
+            try:
+                rephrase_prompt = ChatPromptTemplate.from_messages([
+                    ("system", "Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is. Keep it clear and concise."),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", "{question}")
+                ])
+                self.rephrase_chain = rephrase_prompt | self.llm
+
+                general_chat_prompt = ChatPromptTemplate.from_messages([
+                    ("system", "You are MediPulse AI, an intelligent clinical and hospital operations assistant. Help the user with general inquiries politely."),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", "{question}")
+                ])
+                self.general_chat_chain = general_chat_prompt | self.llm
+
+                rag_prompt_template = ChatPromptTemplate.from_messages([
+                    ("system", "You are the MediPulse AI Knowledge Assistant. Answer the user's question using ONLY the provided hospital policy and SOP context.\n"
+                               "If the answer cannot be found in the context, reply: \"I cannot find the answer in the current hospital policy records. Please verify with administration.\"\n\n"
+                               "Context:\n{context}"),
+                    ("human", "{question}")
+                ])
+                self.rag_chain = rag_prompt_template | self.llm
+                logger.info("LangChain chains successfully pre-built.")
+            except Exception as e:
+                logger.error(f"Failed to build LangChain chains: {e}")
+
+    def initialize_db(self):
+        db_user = os.getenv("DB_USER", "root")
+        db_password = os.getenv("DB_PASSWORD", "oracle")
+        db_host = os.getenv("DB_HOST", "localhost")
+        db_port = os.getenv("DB_PORT", "3306")
+        db_name = os.getenv("DB_NAME", "hospital_db")
+        db_uri = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        
+        if self.db_engine:
+            try:
+                self.db_engine.dispose()
+            except Exception:
+                pass
+                
+        try:
+            self.db_engine = create_engine(
+                db_uri,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                connect_args={"connect_timeout": 5}
+            )
+            with self.db_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            self.database_ready = True
+            
+            # Recreate SQL database and agent
+            if self.gemini_ready:
+                self.db = SQLDatabase.from_uri(db_uri)
+                self.sql_agent = create_sql_agent(
+                    llm=self.llm,
+                    db=self.db,
+                    agent_type="zero-shot-react-description",
+                    verbose=True
+                )
+                logger.info("LangChain SQL Agent successfully initialized/reconnected.")
+        except Exception as e:
+            logger.error(f"Failed to connect to database during initialization/reconnection: {e}")
+            self.database_ready = False
+            self.sql_agent = None
+
+# Lifespan manager to verify initialization without crashing (Requirement 1 & 3)
+ai_manager = AIServiceManager()
+ai_manager.initialize()  # Eager init so components are available at import time
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("--- Starting Startup Validation ---")
+    
+    # Re-initialize if not already done
+    if not ai_manager.gemini_ready and not ai_manager.embeddings_ready:
+        ai_manager.initialize()
+    
+    # Verify Gemini Connection
+    if ai_manager.gemini_ready:
+        try:
+            logger.info("Verifying Gemini connection...")
+            if ai_manager.is_mock_mode:
+                logger.info("Gemini connection validation skipped (Mock Mode).")
+            else:
+                test_res = retry_llm_call(ai_manager.llm.invoke, "Hello")
+                logger.info("Gemini connection verified.")
+        except Exception as e:
+            logger.error(f"Gemini connection verification failed: {e}")
+            ai_manager.gemini_ready = False
+            
+    # Verify Vector Database
+    if ai_manager.vector_store_ready:
+        try:
+            logger.info("Verifying vector database...")
+            ai_manager.vector_store.similarity_search("test", k=1)
+            logger.info("Vector database verified.")
+        except Exception as e:
+            logger.error(f"Vector database verification failed: {e}. Recreating...")
+            try:
+                ai_manager.vector_store.recreate_store()
+                logger.info("Vector database recreated successfully.")
+            except Exception as re_err:
+                logger.error(f"Failed to recreate vector database: {re_err}")
+                ai_manager.vector_store_ready = False
+
+    # Verify Upload Directories
+    try:
+        logger.info("Verifying upload directories...")
+        upload_dir = "./uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        test_file = os.path.join(upload_dir, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        logger.info("Upload directories verified.")
+    except Exception as e:
+        logger.error(f"Upload directories verification failed: {e}")
+
+    # Verify Database Connection
+    if ai_manager.database_ready:
+        try:
+            logger.info("Verifying database connection...")
+            with ai_manager.db_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("Database connection verified.")
+        except Exception as e:
+            logger.error(f"Database connection verification failed: {e}")
+            ai_manager.database_ready = False
+
+    logger.info("--- Startup Validation Complete ---")
+    logger.info(f"Gemini: {'CONNECTED' if ai_manager.gemini_ready else 'UNAVAILABLE'}, "
+                f"Vector Store: {'READY' if ai_manager.vector_store_ready else 'UNAVAILABLE'}, "
+                f"Database: {'CONNECTED' if ai_manager.database_ready else 'UNAVAILABLE'}, "
+                f"Embeddings: {'READY' if ai_manager.embeddings_ready else 'UNAVAILABLE'}")
+    
+    yield
+    logger.info("Shutting down AI Service...")
+
+app = FastAPI(title="MediPulse AI Service", version="1.0.0", lifespan=lifespan)
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# In-Memory Conversational Memory mapping: session_id -> list of messages
-session_memories: Dict[str, List[Dict[str, str]]] = {}
+# Request logger middleware (Requirement 5 & Phase 6)
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Request received: {request.method} {request.url.path}")
+    response = await call_next(request)
+    return response
+
+# Standard JSON error response builder (Phase 3)
+def build_error_response(status_code: int, error: str, details: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "error": error,
+            "details": details,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "request_id": str(uuid.uuid4())
+        }
+    )
+
+# Global Exception Handlers (Requirement 4 & Phase 3)
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}")
+    return build_error_response(exc.status_code, exc.detail, "HTTPException")
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.error(f"Starlette HTTP Exception: {exc.status_code} - {exc.detail}")
+    return build_error_response(exc.status_code, exc.detail, "StarletteHTTPException")
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"RequestValidationError: {str(exc)}")
+    return build_error_response(status.HTTP_400_BAD_REQUEST, "Invalid request parameters.", str(exc.errors()))
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled Exception: {str(exc)}")
+    logger.error(traceback.format_exc())
+    return build_error_response(
+        status.HTTP_500_INTERNAL_SERVER_ERROR, 
+        "An unexpected error occurred. Please contact the administrator.", 
+        "logged internally"
+    )
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False)
+
+def get_db_session():
+    # Phase 4 Recovery: auto reconnect if database is not ready
+    if not ai_manager.database_ready:
+        logger.warning("Database unavailable. Attempting to reconnect...")
+        try:
+            ai_manager.initialize_db()
+        except Exception as e:
+            logger.error(f"Reconnection failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database service is temporarily unavailable."
+            )
+            
+    if not ai_manager.database_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is temporarily unavailable."
+        )
+        
+    session = SessionLocal(bind=ai_manager.db_engine)
+    try:
+        # Ping connection
+        session.execute(text("SELECT 1"))
+        yield session
+    except Exception as e:
+        logger.warning(f"Database session query failed: {e}. Reinitializing connection...")
+        try:
+            ai_manager.initialize_db()
+            session.close()
+            session = SessionLocal(bind=ai_manager.db_engine)
+            session.execute(text("SELECT 1"))
+            yield session
+        except Exception as re_err:
+            logger.error(f"Database re-initialization failed: {re_err}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database service is temporarily unavailable."
+            )
+    finally:
+        session.close()
 
 # Pydantic Schemas
 class ChatRequest(BaseModel):
@@ -382,40 +781,33 @@ def get_contextualized_query(query: str, chat_history: List[Dict[str, str]]) -> 
     if not chat_history:
         return query
 
-    # Convert to LangChain message structure
     lc_history = []
-    for msg in chat_history[-6:]:  # Keep last 3 turns
+    for msg in chat_history[-6:]:
         if msg["role"] == "user":
             lc_history.append(HumanMessage(content=msg["content"]))
         else:
             lc_history.append(AIMessage(content=msg["content"]))
 
-    rephrase_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is. Keep it clear and concise."),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}")
-    ])
+    if not ai_manager.rephrase_chain or not ai_manager.gemini_ready:
+        return query
 
-    chain = rephrase_prompt | llm
     try:
-        response = chain.invoke({"chat_history": lc_history, "question": query})
+        response = retry_llm_call(
+            ai_manager.rephrase_chain.invoke,
+            {"chat_history": lc_history, "question": query}
+        )
         rephrased = response.content.strip()
         logger.info(f"Rephrased query: '{query}' -> '{rephrased}'")
         return rephrased
     except Exception as e:
-        logger.error(f"Rephraser failed, using original: {str(e)}")
+        logger.error(f"Rephraser failed, using original query: {str(e)}")
         return query
 
-# ── Query Classification ──────────────────────────────────────────────
+# Query Classification
 def classify_query(user_query: str) -> str:
-    """
-    Classify a user query into SQL, RAG, or GENERAL.
+    if not ai_manager.gemini_ready:
+        return "GENERAL"
 
-    Uses a structured ChatPromptTemplate so the LLM's system instructions
-    (which contain domain keywords) are kept in the *system* message and
-    only the raw user query appears in the *human* message.  This prevents
-    the classifier from matching on its own prompt text.
-    """
     classification_prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are a routing agent for a hospital AI assistant named MediPulse AI. "
@@ -432,14 +824,13 @@ def classify_query(user_query: str) -> str:
         ("human", "{query}"),
     ])
 
-    chain = classification_prompt | llm
+    chain = classification_prompt | ai_manager.llm
     try:
-        result = chain.invoke({"query": user_query}).content.strip().upper()
+        result = retry_llm_call(chain.invoke, {"query": user_query}).content.strip().upper()
     except Exception as e:
         logger.error(f"LLM Classification failed: {str(e)}")
         result = "GENERAL"
 
-    # Normalise: accept only known labels
     if "SQL" in result:
         result = "SQL"
     elif "RAG" in result:
@@ -447,15 +838,113 @@ def classify_query(user_query: str) -> str:
     else:
         result = "GENERAL"
 
-    # ── Debug logging ─────────────────────────────────────────────────
     logger.info(f"[Classifier] User Query      : {user_query}")
     logger.info(f"[Classifier] Classification  : {result}")
-    route = {"SQL": "Database Agent", "RAG": "Knowledge Base (RAG)", "GENERAL": "General Chat"}
-    logger.info(f"[Classifier] Selected Route  : {route.get(result, 'General Chat')}")
     return result
 
-
 # ── Endpoints ─────────────────────────────────────────────────────────
+
+# Health Check (Requirement 2 & Phase 5)
+@app.get("/ai/health")
+def health_check():
+    gemini_status = "CONNECTED" if ai_manager.gemini_ready else "ERROR"
+    if ai_manager.gemini_ready and ai_manager.is_mock_mode:
+        gemini_status = "MOCK"
+        
+    vector_status = "READY" if ai_manager.vector_store_ready else "ERROR"
+    db_status = "CONNECTED" if ai_manager.database_ready else "ERROR"
+    embeddings_status = "READY" if ai_manager.embeddings_ready else "ERROR"
+    sql_agent_status = "READY" if (ai_manager.database_ready and ai_manager.gemini_ready and ai_manager.sql_agent is not None) else "ERROR"
+    rag_status = "READY" if (ai_manager.vector_store_ready and ai_manager.embeddings_ready) else "ERROR"
+    pdf_status = "READY" if ai_manager.gemini_ready else "ERROR"
+
+    status_flags = [ai_manager.gemini_ready, ai_manager.vector_store_ready, ai_manager.database_ready, ai_manager.embeddings_ready]
+    if all(status_flags):
+        overall_status = "UP"
+    elif any(status_flags):
+        overall_status = "DEGRADED"
+    else:
+        overall_status = "DOWN"
+
+    return {
+        "status": overall_status,
+        "gemini": gemini_status,
+        "database": db_status,
+        "vector_store": vector_status,
+        "embeddings": embeddings_status,
+        "sql_agent": sql_agent_status,
+        "rag": rag_status,
+        "pdf": pdf_status,
+        "version": "1.0.0"
+    }
+
+# Diagnostics endpoint (Phase 5)
+@app.get("/ai/health/details")
+def health_details():
+    db_detail = {}
+    if ai_manager.database_ready:
+        try:
+            with ai_manager.db_engine.connect() as conn:
+                res = conn.execute(text("SELECT COUNT(*) FROM patients")).scalar()
+                db_detail = {"status": "CONNECTED", "registered_patients": res}
+        except Exception as e:
+            db_detail = {"status": "ERROR", "message": str(e)}
+    else:
+        db_detail = {"status": "ERROR", "message": "Database not initialized"}
+
+    vector_detail = {}
+    if ai_manager.vector_store_ready:
+        try:
+            vector_detail = {
+                "status": "READY",
+                "document_count": len(ai_manager.vector_store.documents),
+                "file_path": ai_manager.vector_store.file_path
+            }
+        except Exception as e:
+            vector_detail = {"status": "ERROR", "message": str(e)}
+    else:
+        vector_detail = {"status": "ERROR", "message": "Vector store not initialized"}
+
+    embeddings_detail = {}
+    if ai_manager.embeddings_ready:
+        try:
+            embeddings_detail = {
+                "status": "READY",
+                "cached_embeddings_count": len(ai_manager.embeddings.cache),
+                "cache_file": ai_manager.embeddings.cache_file
+            }
+        except Exception as e:
+            embeddings_detail = {"status": "ERROR", "message": str(e)}
+    else:
+        embeddings_detail = {"status": "ERROR", "message": "Embeddings not initialized"}
+
+    return {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "version": "1.0.0",
+        "subsystems": {
+            "gemini": {
+                "status": "CONNECTED" if ai_manager.gemini_ready else "ERROR",
+                "mock_mode": ai_manager.is_mock_mode,
+                "model": "mock-model" if ai_manager.is_mock_mode else "gemini-1.5-flash"
+            },
+            "database": db_detail,
+            "vector_store": vector_detail,
+            "embeddings": embeddings_detail,
+            "sql_agent": {
+                "status": "READY" if ai_manager.sql_agent is not None else "ERROR"
+            },
+            "rag": {
+                "status": "READY" if (ai_manager.vector_store_ready and ai_manager.embeddings_ready) else "ERROR"
+            },
+            "pdf": {
+                "status": "READY" if ai_manager.gemini_ready else "ERROR"
+            }
+        }
+    }
+
+# Chat Assistant with Graceful Degradation (Requirement 9)
+session_memories: Dict[str, List[Dict[str, str]]] = {}
+
 @app.post("/ai/chat", response_model=ChatResponse)
 def chat_assistant(request: ChatRequest, user: Dict[str, Any] = Depends(get_current_user)):
     query = request.message
@@ -469,14 +958,21 @@ def chat_assistant(request: ChatRequest, user: Dict[str, Any] = Depends(get_curr
     # Contextualize query
     standalone_query = get_contextualized_query(query, history)
 
-    # Classify using dedicated function (only the user query is analysed)
+    # Classify
     classification_res = classify_query(standalone_query)
+
+    # Graceful degradation checks
+    if not ai_manager.gemini_ready:
+        return ChatResponse(
+            response="I'm temporarily unable to contact the language model.",
+            category="GENERAL"
+        )
 
     response_text = ""
     # Process by category
     if "SQL" in classification_res:
-        if is_mock_mode:
-            db_session = SessionLocal()
+        if ai_manager.is_mock_mode:
+            db_session = SessionLocal(bind=ai_manager.db_engine)
             try:
                 patients_count = db_session.execute(text("SELECT COUNT(*) FROM patients")).scalar()
                 doctors_count = db_session.execute(text("SELECT COUNT(*) FROM doctors")).scalar()
@@ -485,65 +981,75 @@ def chat_assistant(request: ChatRequest, user: Dict[str, Any] = Depends(get_curr
                 response_text = f"Database status (Mock Mode): Connected. Registered Patients: {patients_count}, Registered Doctors: {doctors_count}, Total Appointments: {appointments_count}, Total Paid Revenue: ${bills_sum:.2f}."
             except Exception as sql_err:
                 logger.error(f"Mock SQL query failed: {str(sql_err)}")
-                logger.error(traceback.format_exc())
                 response_text = f"Database status (Mock Mode): Connected but query failed: {str(sql_err)}"
             finally:
                 db_session.close()
-        elif sql_agent:
+        elif not ai_manager.database_ready or not ai_manager.sql_agent:
+            logger.warning("SQL DB / Agent is unavailable. Degrading chat response.")
+            response_text = "Database service is temporarily unavailable."
+        else:
             try:
-                # Inject extra instructions for DB Queries to protect schema and formats
+                logger.info(f"SQL execution started: '{standalone_query}'")
+                start_time = datetime.now()
                 db_query_prompt = f"""
                 You are a hospital DB assistant. Answer the user question by querying the database.
                 Only answer questions using the database information.
                 Question: {standalone_query}
                 """
-                response_text = sql_agent.run(db_query_prompt)
+                response_text = retry_llm_call(ai_manager.sql_agent.run, db_query_prompt)
+                latency = (datetime.now() - start_time).total_seconds()
+                logger.info(f"SQL execution completed. Latency: {latency:.4f}s.")
             except Exception as e:
                 logger.error(f"SQL Agent failed: {str(e)}")
-                logger.error(traceback.format_exc())
-                response_text = f"I encountered an error querying the hospital records database: {str(e)}"
-        else:
-            response_text = "SQL database agent is not available."
+                response_text = "Database service is temporarily unavailable."
+
     elif "RAG" in classification_res:
-        try:
-            # Query Vector Store
-            retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-            docs = retriever.get_relevant_documents(standalone_query)
-            context = "\n\n".join([doc.page_content for doc in docs])
-            
-            rag_prompt = f"""
-            You are the MediPulse AI Knowledge Assistant. Answer the user's question using ONLY the provided hospital policy and SOP context.
-            If the answer cannot be found in the context, reply: "I cannot find the answer in the current hospital policy records. Please verify with administration."
-            
-            Context:
-            {context}
-            
-            Question:
-            {standalone_query}
-            
-            Answer:
-            """
-            response_text = llm.invoke(rag_prompt).content.strip()
-        except Exception as e:
-            logger.error(f"RAG Retrieval failed: {str(e)}")
-            logger.error(traceback.format_exc())
-            response_text = f"I failed to query the hospital policy database: {str(e)}"
+        if not ai_manager.vector_store_ready or not ai_manager.embeddings_ready:
+            logger.warning("RAG Vector Store / Embeddings unavailable. Degrading chat response.")
+            response_text = "Knowledge base unavailable."
+        else:
+            try:
+                logger.info(f"RAG retrieval started for query: '{standalone_query}'")
+                start_time = datetime.now()
+                retriever = ai_manager.vector_store.as_retriever(search_kwargs={"k": 3})
+                docs = run_with_timeout(retriever.get_relevant_documents, 15.0, query=standalone_query)
+                latency = (datetime.now() - start_time).total_seconds()
+                logger.info(f"RAG retrieval completed. Latency: {latency:.4f}s. Found {len(docs)} documents.")
+                
+                context = "\n\n".join([doc.page_content for doc in docs])
+                rag_prompt = f"""
+                You are the MediPulse AI Knowledge Assistant. Answer the user's question using ONLY the provided hospital policy and SOP context.
+                If the answer cannot be found in the context, reply: "I cannot find the answer in the current hospital policy records. Please verify with administration."
+                
+                Context:
+                {context}
+                
+                Question:
+                {standalone_query}
+                
+                Answer:
+                """
+                response_text = retry_llm_call(ai_manager.rag_chain.invoke, {"context": context, "question": standalone_query}).content.strip()
+            except Exception as e:
+                logger.error(f"RAG Retrieval or Gen failed: {str(e)}")
+                response_text = "Knowledge base unavailable."
     else:
         # GENERAL chat with context
-        system_prompt = "You are MediPulse AI, an intelligent clinical and hospital operations assistant. Help the user with general inquiries politely."
-        messages = [("system", system_prompt)]
+        lc_history = []
         for msg in history[-6:]:
-            messages.append((msg["role"], msg["content"]))
-        messages.append(("human", standalone_query))
-        
+            if msg["role"] == "user":
+                lc_history.append(HumanMessage(content=msg["content"]))
+            else:
+                lc_history.append(AIMessage(content=msg["content"]))
+
         try:
-            prompt = ChatPromptTemplate.from_messages(messages)
-            chain = prompt | llm
-            response_text = chain.invoke({}).content.strip()
+            response_text = retry_llm_call(
+                ai_manager.general_chat_chain.invoke,
+                {"chat_history": lc_history, "question": standalone_query}
+            ).content.strip()
         except Exception as e:
             logger.error(f"General chat chain failed: {str(e)}")
-            logger.error(traceback.format_exc())
-            response_text = f"I'm having trouble thinking right now: {str(e)}"
+            response_text = "I'm temporarily unable to contact the language model."
 
     # Update history
     history.append({"role": "user", "content": query})
@@ -558,46 +1064,59 @@ def chat_assistant(request: ChatRequest, user: Dict[str, Any] = Depends(get_curr
 
     return ChatResponse(response=response_text, category=category_mapped)
 
+# Upload Medical Report with Timeout and Graceful degradation (Requirement 8 & 9)
 @app.post("/ai/upload-report")
 async def upload_medical_report(file: UploadFile = File(...), user: Dict[str, Any] = Depends(get_current_user)):
-    # Doctor and Admin only
     if user["role"] not in ["ADMIN", "DOCTOR"]:
-        return JSONResponse(
-            status_code=403,
-            content={"success": False, "error": "Access denied. Only ADMIN and DOCTOR roles can analyze reports."}
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Only ADMIN and DOCTOR roles can analyze reports."
         )
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": "Only PDF reports are supported currently."}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF reports are supported currently."
         )
 
-    # Step 1: Read and extract text from the PDF
+    if not ai_manager.gemini_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="I'm temporarily unable to contact the language model."
+        )
+
+    contents = await file.read()
+    logger.info(f"Received PDF '{file.filename}' — {len(contents)} bytes")
+
+    # Step 1: Read and extract text from the PDF with a 30s timeout
+    logger.info(f"PDF parsing started for file '{file.filename}'")
+    start_time = datetime.now()
     try:
-        contents = await file.read()
-        logger.info(f"Received PDF '{file.filename}' — {len(contents)} bytes")
-        import io
-        reader = PdfReader(io.BytesIO(contents))
-        text_content = ""
-        for page in reader.pages:
-            text_content += page.extract_text() or ""
-        logger.info(f"Extracted {len(text_content)} characters from {len(reader.pages)} pages")
+        def parse_pdf():
+            import io
+            reader = PdfReader(io.BytesIO(contents))
+            text_content = ""
+            for page in reader.pages:
+                text_content += page.extract_text() or ""
+            return text_content
+
+        text_content = run_with_timeout(parse_pdf, timeout=30.0)
+        latency = (datetime.now() - start_time).total_seconds()
+        logger.info(f"PDF parsing completed. Latency: {latency:.4f}s.")
     except Exception as e:
         logger.error(f"PDF text extraction failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"PDF text extraction failed: {str(e)}"}
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to analyze this PDF."
         )
 
     if not text_content.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": "No extractable text found in PDF. The document may be scanned or image-based."}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to analyze this PDF."
         )
 
-    # Step 2: Ask the LLM to extract structured data
+    # Step 2: Extract structured data using LLM
     try:
         prompt = f"""
         You are an expert clinical summarizer. Read the following medical report text and extract the key patient, diagnosis, medicine, and doctor information.
@@ -615,19 +1134,17 @@ async def upload_medical_report(file: UploadFile = File(...), user: Dict[str, An
         Report Text:
         {text_content}
         """
-        gemini_res = llm.invoke(prompt).content.strip()
+        gemini_res = retry_llm_call(ai_manager.llm.invoke, prompt).content.strip()
         logger.info(f"LLM raw response ({len(gemini_res)} chars): {gemini_res[:300]}")
     except Exception as e:
         logger.error(f"LLM invocation failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"AI model invocation failed: {str(e)}"}
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="I'm temporarily unable to contact the language model."
         )
 
-    # Step 3: Parse LLM output into JSON — robust extraction
+    # Step 3: Parse LLM output into JSON
     try:
-        # Strategy 1: Strip markdown code fences
         cleaned = gemini_res
         if cleaned.startswith("```json"):
             cleaned = cleaned[len("```json"):]
@@ -637,71 +1154,102 @@ async def upload_medical_report(file: UploadFile = File(...), user: Dict[str, An
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
 
-        # Strategy 2: Try direct parse
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            # Strategy 3: Regex extract first { ... } block
             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', gemini_res, re.DOTALL)
             if match:
                 data = json.loads(match.group())
             else:
-                raise ValueError(f"Could not extract JSON from LLM response: {gemini_res[:200]}")
+                raise ValueError("Could not extract JSON")
 
-        # Ensure the success field is present
         data["success"] = True
         logger.info(f"Report analysis successful: patient={data.get('patient_name')}")
         return JSONResponse(content=data)
 
     except Exception as e:
         logger.error(f"JSON parsing failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"Failed to parse AI response as JSON: {str(e)}"}
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to analyze this PDF."
         )
 
+# Upload Policy Document (Phase 4 Recovery for upload directory missing)
 @app.post("/ai/upload-policy")
 async def upload_policy_document(file: UploadFile = File(...), user: Dict[str, Any] = Depends(get_current_user)):
-    # Admin only
     if user["role"] != "ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrator can upload policy guidelines")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrator can upload policy guidelines"
+        )
 
     if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF guidelines are supported.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF guidelines are supported."
+        )
+
+    if not ai_manager.vector_store_ready or not ai_manager.embeddings_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge base unavailable."
+        )
+
+    contents = await file.read()
+    
+    # Parse with 30s timeout
+    logger.info(f"PDF parsing started for policy file '{file.filename}'")
+    start_time = datetime.now()
+    try:
+        def parse_pdf():
+            import io
+            reader = PdfReader(io.BytesIO(contents))
+            text_content = ""
+            for page in reader.pages:
+                text_content += page.extract_text() or ""
+            return text_content
+
+        text_content = run_with_timeout(parse_pdf, timeout=30.0)
+        latency = (datetime.now() - start_time).total_seconds()
+        logger.info(f"PDF parsing completed. Latency: {latency:.4f}s.")
+    except Exception as e:
+        logger.error(f"PDF policy parsing failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to analyze this PDF."
+        )
+
+    if not text_content.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to analyze this PDF."
+        )
 
     try:
-        reader = PdfReader(file.file)
-        text_content = ""
-        for page in reader.pages:
-            text_content += page.extract_text() or ""
-
-        if not text_content.strip():
-            raise ValueError("Empty policy document")
-
-        # Chunk policy text
+        # Chunk text
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
         chunks = text_splitter.split_text(text_content)
-
         docs = [Document(page_content=c, metadata={"source": file.filename}) for c in chunks]
         
-        # Save chunks to Vector database
-        vector_store.add_documents(docs)
+        # Save chunks with 15s timeout
+        run_with_timeout(ai_manager.vector_store.add_documents, 15.0, documents=docs)
         return {"status": "Success", "message": f"Successfully indexed policy '{file.filename}' into vector store ({len(docs)} chunks)."}
     except Exception as e:
         logger.error(f"Policy ingestion failed: {str(e)}")
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to index policy guideline: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Knowledge base unavailable."
         )
 
+# Insights Endpoint
 @app.get("/ai/insights")
-def get_insights(user: Dict[str, Any] = Depends(get_current_user)):
-    # Admin and Doctor only
+def get_insights(db_session = Depends(get_db_session), user: Dict[str, Any] = Depends(get_current_user)):
     if user["role"] not in ["ADMIN", "DOCTOR"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
 
-    db_session = SessionLocal()
     try:
         # 1. Patient Growth Trends by Gender
         growth_query = db_session.execute(text(
@@ -717,16 +1265,13 @@ def get_insights(user: Dict[str, Any] = Depends(get_current_user)):
         disease_counts = {}
         for r in history_query:
             history = r[0] or "Unknown"
-            # Split by common characters
             conditions = [c.strip() for c in history.replace(";", ",").split(",") if c.strip()]
             for cond in conditions:
-                # Basic cleaning (e.g. "Report Date:" fields can be ignored)
                 if "[" in cond or "Report" in cond or "Rx" in cond:
                     continue
                 disease_counts[cond] = disease_counts.get(cond, 0) + 1
 
         disease_distribution = [{"name": name, "value": count} for name, count in disease_counts.items()]
-        # Sort and take top 5
         disease_distribution = sorted(disease_distribution, key=lambda x: x["value"], reverse=True)[:5]
 
         # 3. Revenue Trends from PAID bills
@@ -738,7 +1283,7 @@ def get_insights(user: Dict[str, Any] = Depends(get_current_user)):
         for r in revenue_query:
             g_date = r[0]
             date_str = g_date.strftime("%Y-%m-%d") if isinstance(g_date, (date, datetime)) else str(g_date)
-            revenue_trends.append({"date": date_str, "revenue": r[1]})
+            revenue_trends.append({"date": date_str, "revenue": float(r[1])})
 
         # 4. Appointment Trends
         appointment_query = db_session.execute(text(
@@ -760,7 +1305,6 @@ def get_insights(user: Dict[str, Any] = Depends(get_current_user)):
         for r in risk_query:
             patient_id, name, age, history = r
             history_str = history or ""
-            # Identify risk triggers
             triggers = ["hypertension", "diabetes", "heart", "critical", "acute", "bronchitis"]
             is_risk = any(t in history_str.lower() for t in triggers) or age > 65
             if is_risk:
@@ -782,11 +1326,9 @@ def get_insights(user: Dict[str, Any] = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Failed to gather insights: {str(e)}")
         raise HTTPException(
-            status_code=500,
-            detail=f"Insights collection error: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database service is temporarily unavailable."
         )
-    finally:
-        db_session.close()
 
 if __name__ == "__main__":
     import uvicorn

@@ -34,17 +34,18 @@ const AIReportAnalysis = () => {
 
     try {
       const result = await analyzeMedicalReport(reportFile);
-      // Handle JSON error responses (status 200 but success: false)
       if (result.success === false) {
-        setReportError(result.error || "Unknown error during report analysis.");
+        setReportError(result.error || "Unable to analyze this PDF.");
       } else {
         setAnalysisResult(result);
       }
     } catch (err) {
       console.error(err);
       const data = err.response?.data;
-      // Handle both new format {success, error} and old format {detail}
-      const errorMsg = data?.error || data?.detail || "Failed to analyze medical report. Ensure it is a valid PDF and the AI service is active.";
+      let errorMsg = data?.error || data?.detail || "Unable to analyze this PDF.";
+      if (errorMsg.includes("Internal Server Error") || errorMsg.includes("500") || errorMsg.includes("unexpected error")) {
+        errorMsg = "Unable to analyze this PDF.";
+      }
       setReportError(errorMsg);
     } finally {
       setAnalyzing(false);
@@ -65,7 +66,12 @@ const AIReportAnalysis = () => {
       setPolicyFile(null);
     } catch (err) {
       console.error(err);
-      setPolicyError(err.response?.data?.detail || "Failed to index policy guideline document.");
+      const data = err.response?.data;
+      let errorMsg = data?.error || data?.detail || "Knowledge base is currently unavailable.";
+      if (errorMsg.includes("Internal Server Error") || errorMsg.includes("500") || errorMsg.includes("unavailable") || errorMsg.includes("failed")) {
+        errorMsg = "Knowledge base is currently unavailable.";
+      }
+      setPolicyError(errorMsg);
     } finally {
       setIngesting(false);
     }
@@ -145,8 +151,17 @@ const AIReportAnalysis = () => {
                 </div>
 
                 {reportError && (
-                  <div className="p-3 bg-red-50 border border-red-150 rounded-xl text-xs font-semibold text-red-600">
-                    {reportError}
+                  <div className="space-y-2">
+                    <div className="p-3 bg-red-50 border border-red-150 rounded-xl text-xs font-semibold text-red-650">
+                      {reportError}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleReportUpload}
+                      className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[10px] font-bold border border-slate-200 transition-all duration-150 cursor-pointer"
+                    >
+                      Retry Upload
+                    </button>
                   </div>
                 )}
 
@@ -325,8 +340,17 @@ const AIReportAnalysis = () => {
             )}
 
             {policyError && (
-              <div className="p-3.5 bg-red-50 border border-red-150 rounded-xl text-xs font-semibold text-red-700">
-                {policyError}
+              <div className="space-y-2">
+                <div className="p-3.5 bg-red-50 border border-red-150 rounded-xl text-xs font-semibold text-red-700">
+                  {policyError}
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePolicyUpload}
+                  className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[10px] font-bold border border-slate-200 transition-all duration-150 cursor-pointer"
+                >
+                  Retry Upload
+                </button>
               </div>
             )}
 
