@@ -1,0 +1,233 @@
+# ==========================================
+# RENDER BLUEPRINT — MediPulse AI Hospital Management System
+# ==========================================
+# Deploy all backend services with: render blueprint apply
+# Documentation: https://render.com/docs/blueprint-spec
+# ==========================================
+#
+# BEFORE DEPLOYING:
+# 1. Set up an external MySQL database (Aiven, Railway, or AWS RDS)
+# 2. Update the database env vars below with your MySQL connection details
+# 3. After all services deploy, update EUREKA_SERVER_URL on each service
+# 4. Update AI_SERVICE_URL on api-gateway
+# 5. Update CORS_ALLOWED_ORIGINS on api-gateway with your Vercel frontend URL
+# ==========================================
+
+services:
+  # ==========================================
+  # 1. Eureka Service Discovery Server
+  # ==========================================
+  - type: web
+    name: medpulse-eureka-server
+    runtime: docker
+    dockerfilePath: ./eureka-server/Dockerfile
+    dockerContext: ./eureka-server
+    plan: starter # free tier spins down; starter keeps it running
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8761
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+
+  # ==========================================
+  # 2. Auth Service
+  # ==========================================
+  - type: web
+    name: medpulse-auth-service
+    runtime: docker
+    dockerfilePath: ./auth-service/Dockerfile
+    dockerContext: ./auth-service
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8081
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: DB_HOST
+        sync: false # Set manually to your external MySQL host
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false # Set manually
+      - key: DB_PASSWORD
+        sync: false # Set manually
+      - key: JWT_SECRET
+        sync: false # Set manually — must match across all services
+      - key: EUREKA_SERVER_URL
+        sync: false # Set to: https://medpulse-eureka-server.onrender.com/eureka/
+
+  # ==========================================
+  # 3. Patient Service
+  # ==========================================
+  - type: web
+    name: medpulse-patient-service
+    runtime: docker
+    dockerfilePath: ./patient-service/Dockerfile
+    dockerContext: ./patient-service
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: EUREKA_SERVER_URL
+        sync: false
+
+  # ==========================================
+  # 4. Doctor Service
+  # ==========================================
+  - type: web
+    name: medpulse-doctor-service
+    runtime: docker
+    dockerfilePath: ./doctor-service/Dockerfile
+    dockerContext: ./doctor-service
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8082
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: EUREKA_SERVER_URL
+        sync: false
+
+  # ==========================================
+  # 5. Appointment Service
+  # ==========================================
+  - type: web
+    name: medpulse-appointment-service
+    runtime: docker
+    dockerfilePath: ./appointment-service/Dockerfile
+    dockerContext: ./appointment-service
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8083
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: EUREKA_SERVER_URL
+        sync: false
+
+  # ==========================================
+  # 6. Billing Service
+  # ==========================================
+  - type: web
+    name: medpulse-billing-service
+    runtime: docker
+    dockerfilePath: ./billing-service/Dockerfile
+    dockerContext: ./billing-service
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8084
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: EUREKA_SERVER_URL
+        sync: false
+
+  # ==========================================
+  # 7. AI Service (FastAPI / Python)
+  # ==========================================
+  - type: web
+    name: medpulse-ai-service
+    runtime: docker
+    dockerfilePath: ./ai-service/Dockerfile
+    dockerContext: ./ai-service
+    plan: starter
+    healthCheckPath: /ai/health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 3306
+      - key: DB_NAME
+        value: hospital_db
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false # Set to your Google Gemini API key
+      - key: CHROMA_PERSIST_DIR
+        value: /app/chroma_db
+
+  # ==========================================
+  # 8. API Gateway (Spring Cloud Gateway)
+  # ==========================================
+  - type: web
+    name: medpulse-api-gateway
+    runtime: docker
+    dockerfilePath: ./api-gateway/Dockerfile
+    dockerContext: ./api-gateway
+    plan: starter
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 9090
+      - key: JAVA_TOOL_OPTIONS
+        value: -Xmx256m
+      - key: EUREKA_SERVER_URL
+        sync: false # Set to: https://medpulse-eureka-server.onrender.com/eureka/
+      - key: AI_SERVICE_URL
+        sync: false # Set to: https://medpulse-ai-service.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # Set to: https://your-app.vercel.app

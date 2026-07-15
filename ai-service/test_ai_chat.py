@@ -28,7 +28,7 @@ def test_ai_chat_flow():
         print(f"Status: {resp.status_code}, Response: {resp.json()}")
         assert resp.status_code == 403
         assert resp.json()["success"] is False
-        assert "technical_reason" in resp.json()
+        assert "error" in resp.json()
 
         # 2. Test JWT Authentication - Invalid Token - returns 401
         print("Testing Unauthorized access (Invalid Token)...")

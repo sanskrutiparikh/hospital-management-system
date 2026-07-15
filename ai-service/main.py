@@ -187,14 +187,32 @@ class MockChatGoogleGenerativeAI(BaseChatModel):
             last_msg = messages[-1].content if messages else ""
             last_msg_lower = last_msg.lower()
 
-            if "2+2" in last_msg_lower or "2 + 2" in last_msg_lower:
-                response_text = "4"
+            # Dynamic math expressions calculator
+            math_match = re.search(r'(\d+(?:\s*[\+\-\*\/]\s*\d+)+)', last_msg_lower)
+            if math_match:
+                expr = math_match.group(1)
+                cleaned_expr = re.sub(r'\s+', '', expr)
+                if re.match(r'^[\d+\-*/()]+$', cleaned_expr):
+                    try:
+                        response_text = str(eval(cleaned_expr, {"__builtins__": None}, {}))
+                    except Exception:
+                        response_text = "I'm sorry, I couldn't compute that math expression."
+                else:
+                    response_text = "I'm sorry, I couldn't compute that math expression."
+            elif "diabetes" in last_msg_lower:
+                response_text = "Diabetes is a chronic condition characterized by high levels of blood sugar (glucose), which can lead to serious damage to the heart, blood vessels, eyes, kidneys, and nerves over time."
+            elif re.search(r'\bai\b', last_msg_lower) or "artificial intelligence" in last_msg_lower:
+                response_text = "Artificial Intelligence (AI) refers to the simulation of human intelligence processes by machines, especially computer systems, including learning, reasoning, and self-correction."
+            elif "who are you" in last_msg_lower or "your name" in last_msg_lower or "who you are" in last_msg_lower:
+                response_text = "I am MediPulse AI, an intelligent clinical and hospital operations assistant. I can help you with patient info, billing, scheduling, and hospital policies."
+            elif any(greet in last_msg_lower for greet in ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"]):
+                response_text = "Hello! I am MediPulse AI, your hospital assistant. How can I help you today?"
             elif "hospital policy" in last_msg_lower or "knowledge assistant" in last_msg_lower:
                 response_text = "According to our hospital policies, check-in requires a valid ID. Details are saved in policy guidelines."
             elif "hospital db assistant" in last_msg_lower:
                 response_text = "Based on the database, we have registered patients and active doctors on staff."
             else:
-                response_text = "Hello! I am MediPulse AI, your hospital assistant. How can I help you today!"
+                response_text = f"I am MediPulse AI, your hospital assistant. I received your query: '{last_msg}'. How can I help you with this?"
 
         generation = ChatGeneration(message=AIMessage(content=response_text))
         return ChatResult(generations=[generation])
